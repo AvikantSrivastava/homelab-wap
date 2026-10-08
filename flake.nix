@@ -182,7 +182,7 @@
                   ${pkgs.iproute2}/bin/ip link set ${cfg.interface} up
 
                   # Setup NAT with nftables
-                  ${pkgs.nftables}/bin/nft -f - <<EOF
+                  ${pkgs.nftables}/bin/nft -f - <<'NFTABLES_EOF'
                   table ip homelab_wap {
                     chain postrouting {
                       type nat hook postrouting priority srcnat; policy accept;
@@ -194,7 +194,7 @@
                       iifname "${cfg.wanInterface}" oifname "${cfg.interface}" ct state related,established accept
                     }
                   }
-                  EOF
+                  NFTABLES_EOF
 
                   echo "Network setup complete"
                 '';
@@ -239,29 +239,29 @@
                     exit 1
                   fi
 
-                  cat > /run/homelab-wap/hostapd.conf <<EOF
-                  interface=${cfg.interface}
-                  driver=nl80211
-                  ssid=${cfg.ssid}
-                  hw_mode=${cfg.hwMode}
-                  channel=${toString cfg.channel}
-                  country_code=${cfg.countryCode}
-
-                  # Security
-                  wpa=2
-                  wpa_passphrase=$PASSWORD
-                  wpa_key_mgmt=WPA-PSK
-                  rsn_pairwise=CCMP
-
-                  # 802.11n/ac support
-                  ieee80211n=1
-                  ieee80211ac=1
-                  wmm_enabled=1
-
-                  # Logging
-                  logger_syslog=-1
-                  logger_syslog_level=2
-                  EOF
+                  {
+                    echo "interface=${cfg.interface}"
+                    echo "driver=nl80211"
+                    echo "ssid=${cfg.ssid}"
+                    echo "hw_mode=${cfg.hwMode}"
+                    echo "channel=${toString cfg.channel}"
+                    echo "country_code=${cfg.countryCode}"
+                    echo ""
+                    echo "# Security"
+                    echo "wpa=2"
+                    echo "wpa_passphrase=$PASSWORD"
+                    echo "wpa_key_mgmt=WPA-PSK"
+                    echo "rsn_pairwise=CCMP"
+                    echo ""
+                    echo "# 802.11n/ac support"
+                    echo "ieee80211n=1"
+                    echo "ieee80211ac=1"
+                    echo "wmm_enabled=1"
+                    echo ""
+                    echo "# Logging"
+                    echo "logger_syslog=-1"
+                    echo "logger_syslog_level=2"
+                  } > /run/homelab-wap/hostapd.conf
 
                   chmod 600 /run/homelab-wap/hostapd.conf
                 '';
