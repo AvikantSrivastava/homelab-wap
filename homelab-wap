@@ -1,0 +1,204 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# homelab-wap - WiFi Access Point manager
+# https://github.com/yourusername/homelab-wap
+
+SERVICE_NAME="homelab-wap"
+CONFIG_FILE="${HOMELAB_WAP_CONFIG:-/etc/homelab-wap/config}"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Load config if exists
+load_config() {
+    if [[ -f "$CONFIG_FILE" ]]; then
+        # shellcheck source=/dev/null
+        source "$CONFIG_FILE"
+    fi
+
+    # Defaults
+    SSID="${SSID:-Homelab}"
+    INTERFACE="${INTERFACE:-wlp192s0}"
+    WAN_INTERFACE="${WAN_INTERFACE:-enp191s0}"
+}
+
+print_status() {
+    local status
+    status=$(systemctl is-active "$SERVICE_NAME" 2>/dev/null || echo "inactive")
+
+    case "$status" in
+        active)
+            echo -e "${GREEN}●${NC} $SERVICE_NAME is ${GREEN}running${NC}"
+            ;;
+        inactive)
+            echo -e "${RED}●${NC} $SERVICE_NAME is ${RED}stopped${NC}"
+            ;;
+        *)
+            echo -e "${YELLOW}●${NC} $SERVICE_NAME is ${YELLOW}$status${NC}"
+            ;;
+    esac
+}
+
+cmd_start() {
+    echo "Starting $SERVICE_NAME..."
+    sudo systemctl start "$SERVICE_NAME"
+    print_status
+}
+
+cmd_stop() {
+    echo "Stopping $SERVICE_NAME..."
+    sudo systemctl stop "$SERVICE_NAME"
+    print_status
+}
+
+cmd_restart() {
+    echo "Restarting $SERVICE_NAME..."
+    sudo systemctl restart "$SERVICE_NAME"
+    print_status
+}
+
+cmd_status() {
+    print_status
+    echo ""
+
+    # Check if running
+    if systemctl is-active "$SERVICE_NAME" &>/dev/null; then
+        echo -e "${BLUE}Interface:${NC} $INTERFACE"
+        echo -e "${BLUE}SSID:${NC} $SSID"
+        echo ""
+
+        # Show connected clients
+        cmd_clients
+    fi
+}
+
+cmd_clients() {
+    echo -e "${BLUE}Connected clients:${NC}"
+
+    # Try to get clients from hostapd
+    if command -v hostapd_cli &>/dev/null; then
+        local clients
+        clients=$(sudo hostapd_cli -i "$INTERFACE" all_sta 2>/dev/null | grep -E "^[0-9a-f]{2}:" || true)
+
+        if [[ -n "$clients" ]]; then
+            echo "$clients" | while read -r mac; do
+                # Try to get hostname from DHCP leases
+                local hostname
+                hostname=$(grep -i "$mac" /var/lib/dnsmasq/dnsmasq.leases 2>/dev/null | awk '{print $4}' || echo "unknown")
+                local ip
+                ip=$(grep -i "$mac" /var/lib/dnsmasq/dnsmasq.leases 2>/dev/null | awk '{print $3}' || echo "unknown")
+                echo "  $mac  $ip  $hostname"
+            done
+        else
+            echo "  No clients connected"
+        fi
+    else
+        # Fallback: check ARP table
+        arp -i "$INTERFACE" -n 2>/dev/null | tail -n +2 || echo "  Unable to list clients"
+    fi
+}
+
+cmd_show_qr() {
+    load_config
+
+    # Get password
+    local password=""
+    if [[ -n "${PASSWORD_FILE:-}" ]] && [[ -f "$PASSWORD_FILE" ]]; then
+        password=$(cat "$PASSWORD_FILE")
+    elif [[ -n "${PASSWORD:-}" ]]; then
+        password="$PASSWORD"
+    else
+        echo -e "${RED}Error:${NC} No password configured"
+        echo "Set PASSWORD or PASSWORD_FILE in $CONFIG_FILE"
+        exit 1
+    fi
+
+    # Generate QR code
+    # Format: WIFI:T:WPA;S:<SSID>;P:<PASSWORD>;;
+    local wifi_string="WIFI:T:WPA;S:${SSID};P:${password};;"
+
+    echo ""
+    echo -e "${BLUE}WiFi Network:${NC} $SSID"
+    echo ""
+
+    if command -v qrencode &>/dev/null; then
+        qrencode -t ANSIUTF8 "$wifi_string"
+    else
+        echo -e "${RED}Error:${NC} qrencode not installed"
+        echo "Install it with: nix-shell -p qrencode"
+        exit 1
+    fi
+
+    echo ""
+    echo -e "${YELLOW}Scan this QR code to connect${NC}"
+}
+
+cmd_logs() {
+    local follow=""
+    if [[ "${1:-}" == "-f" ]] || [[ "${1:-}" == "--follow" ]]; then
+        follow="-f"
+    fi
+
+    journalctl -u "$SERVICE_NAME" -u hostapd -u dnsmasq-wap $follow
+}
+
+cmd_help() {
+    cat <<EOF
+${BLUE}homelab-wap${NC} - WiFi Access Point manager
+
+${YELLOW}USAGE:${NC}
+    homelab-wap <command>
+
+${YELLOW}COMMANDS:${NC}
+    start       Start the access point
+    stop        Stop the access point
+    restart     Restart the access point
+    status      Show status and connected clients
+    clients     List connected clients
+    show-qr     Display WiFi QR code for easy connection
+    logs [-f]   Show logs (use -f to follow)
+    help        Show this help message
+
+${YELLOW}CONFIGURATION:${NC}
+    Config file: $CONFIG_FILE
+
+    Environment variables:
+      HOMELAB_WAP_CONFIG  Path to config file
+
+${YELLOW}EXAMPLES:${NC}
+    homelab-wap start
+    homelab-wap show-qr
+    homelab-wap logs -f
+
+EOF
+}
+
+main() {
+    load_config
+
+    local cmd="${1:-help}"
+    shift || true
+
+    case "$cmd" in
+        start)      cmd_start ;;
+        stop)       cmd_stop ;;
+        restart)    cmd_restart ;;
+        status)     cmd_status ;;
+        clients)    cmd_clients ;;
+        show-qr|qr) cmd_show_qr ;;
+        logs)       cmd_logs "$@" ;;
+        help|--help|-h) cmd_help ;;
+        *)
+            echo -e "${RED}Unknown command:${NC} $cmd"
+            echo "Run 'homelab-wap help' for usage"
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"
