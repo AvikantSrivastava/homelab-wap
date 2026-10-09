@@ -54,6 +54,54 @@
       nixosModules.default = { config, lib, pkgs, ... }:
         let
           cfg = config.services.homelab-wap;
+
+          is5GHz = cfg.hwMode == "a";
+
+          # First channel of the channelWidth-sized block containing cfg.channel (5GHz)
+          blockStart = width:
+            let
+              base = if cfg.channel >= 149 then 149 else 36;
+              span = width / 5;  # channel numbers per block (20MHz = 4)
+            in
+            base + ((cfg.channel - base) / span) * span;
+
+          # hostapd *_oper_centr_freq_seg0_idx for the configured width
+          centerChannel = blockStart cfg.channelWidth + (cfg.channelWidth / 10) - 2;
+
+          # Secondary 20MHz channel above (+) or below (-) the primary
+          ht40Direction =
+            if is5GHz then (if cfg.channel == blockStart 40 then "+" else "-")
+            else (if cfg.channel <= 7 then "+" else "-");
+
+          operChwidth = {
+            "20" = 0;
+            "40" = 0;
+            "80" = 1;
+            "160" = 2;
+          }.${toString cfg.channelWidth};
+
+          radioConfig = lib.concatStringsSep "\n" (
+            [ "ieee80211n=1" ]
+            ++ lib.optionals (cfg.channelWidth >= 40) [
+              "ht_capab=[HT40${ht40Direction}][SHORT-GI-20][SHORT-GI-40]"
+            ]
+            ++ lib.optionals is5GHz [
+              "ieee80211ac=1"
+              "vht_oper_chwidth=${toString operChwidth}"
+            ]
+            ++ lib.optionals (is5GHz && cfg.channelWidth >= 80) [
+              "vht_capab=[SHORT-GI-80]${lib.optionalString (cfg.channelWidth == 160) "[VHT160][SHORT-GI-160]"}"
+              "vht_oper_centr_freq_seg0_idx=${toString centerChannel}"
+            ]
+            ++ lib.optionals cfg.wifi6 (
+              [ "ieee80211ax=1" ]
+              ++ lib.optionals is5GHz [ "he_oper_chwidth=${toString operChwidth}" ]
+              ++ lib.optionals (is5GHz && cfg.channelWidth >= 80) [
+                "he_oper_centr_freq_seg0_idx=${toString centerChannel}"
+              ]
+            )
+            ++ [ "wmm_enabled=1" ]
+          );
         in
         {
           options.services.homelab-wap = {
@@ -118,9 +166,48 @@
               default = "US";
               description = "Country code for regulatory domain";
             };
+
+            channelWidth = lib.mkOption {
+              type = lib.types.enum [ 20 40 80 160 ];
+              default = 80;
+              description = ''
+                Channel width in MHz. 80/160 need 5GHz (hwMode = "a").
+                160 on channels 36-64 or 100-128 uses DFS channels (60s radar scan on start).
+              '';
+            };
+
+            wifi6 = lib.mkOption {
+              type = lib.types.bool;
+              default = true;
+              description = "Enable 802.11ax (WiFi 6)";
+            };
+
+            extraConfig = lib.mkOption {
+              type = lib.types.lines;
+              default = "";
+              example = "beacon_int=100";
+              description = "Extra lines appended to hostapd.conf";
+            };
+
+            serveDns = lib.mkOption {
+              type = lib.types.bool;
+              default = true;
+              description = ''
+                Whether dnsmasq also serves DNS on the AP. Set to false when another
+                resolver on this host (e.g. Pi-hole) answers DNS at dnsServer;
+                dnsmasq then only does DHCP.
+              '';
+            };
           };
 
           config = lib.mkIf cfg.enable {
+            assertions = [
+              {
+                assertion = is5GHz || cfg.channelWidth <= 40;
+                message = "services.homelab-wap.channelWidth > 40 requires hwMode = \"a\" (5GHz)";
+              }
+            ];
+
             # Ensure required packages are available
             environment.systemPackages = [
               self.packages.${pkgs.system}.homelab-wap
@@ -251,14 +338,19 @@
                     echo "wpa_key_mgmt=WPA-PSK"
                     echo "rsn_pairwise=CCMP"
                     echo ""
-                    echo "# 802.11n/ac support"
-                    echo "ieee80211n=1"
-                    echo "ieee80211ac=1"
-                    echo "wmm_enabled=1"
+                    echo "# Radio (802.11n/ac/ax, ${toString cfg.channelWidth}MHz)"
+                    cat <<'EOF'
+${radioConfig}
+EOF
                     echo ""
                     echo "# Logging"
                     echo "logger_syslog=-1"
                     echo "logger_syslog_level=2"
+                    ${lib.optionalString (cfg.extraConfig != "") ''
+                    cat <<'EOF'
+${cfg.extraConfig}
+EOF
+                    ''}
                   } > /run/homelab-wap/hostapd.conf
 
                   chmod 600 /run/homelab-wap/hostapd.conf
@@ -288,7 +380,7 @@
                 ExecStart = pkgs.writeShellScript "dnsmasq-wap-start" ''
                   exec ${pkgs.dnsmasq}/bin/dnsmasq \
                     --keep-in-foreground \
-                    --no-daemon \
+                    --no-daemon ${lib.optionalString (!cfg.serveDns) "--port=0"} \
                     --interface=${cfg.interface} \
                     --bind-interfaces \
                     --dhcp-range=${cfg.subnet}.50,${cfg.subnet}.150,255.255.255.0,12h \
