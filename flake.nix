@@ -181,27 +181,25 @@
                   ${pkgs.iproute2}/bin/ip addr add ${cfg.subnet}.1/24 dev ${cfg.interface}
                   ${pkgs.iproute2}/bin/ip link set ${cfg.interface} up
 
-                  # Setup NAT with nftables
-                  ${pkgs.nftables}/bin/nft -f - <<'NFTABLES_EOF'
-                  table ip homelab_wap {
-                    chain postrouting {
-                      type nat hook postrouting priority srcnat; policy accept;
-                      oifname "${cfg.wanInterface}" masquerade
-                    }
-                    chain forward {
-                      type filter hook forward priority filter; policy accept;
-                      iifname "${cfg.interface}" oifname "${cfg.wanInterface}" accept
-                      iifname "${cfg.wanInterface}" oifname "${cfg.interface}" ct state related,established accept
-                    }
-                  }
-                  NFTABLES_EOF
+                  # Enable IP forwarding
+                  ${pkgs.procps}/bin/sysctl -w net.ipv4.ip_forward=1
+
+                  # Setup NAT with iptables
+                  ${pkgs.iptables}/bin/iptables -t nat -C POSTROUTING -o ${cfg.wanInterface} -j MASQUERADE 2>/dev/null || \
+                    ${pkgs.iptables}/bin/iptables -t nat -A POSTROUTING -o ${cfg.wanInterface} -j MASQUERADE
+                  ${pkgs.iptables}/bin/iptables -C FORWARD -i ${cfg.interface} -o ${cfg.wanInterface} -j ACCEPT 2>/dev/null || \
+                    ${pkgs.iptables}/bin/iptables -A FORWARD -i ${cfg.interface} -o ${cfg.wanInterface} -j ACCEPT
+                  ${pkgs.iptables}/bin/iptables -C FORWARD -i ${cfg.wanInterface} -o ${cfg.interface} -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || \
+                    ${pkgs.iptables}/bin/iptables -A FORWARD -i ${cfg.wanInterface} -o ${cfg.interface} -m state --state RELATED,ESTABLISHED -j ACCEPT
 
                   echo "Network setup complete"
                 '';
 
                 ExecStop = pkgs.writeShellScript "homelab-wap-teardown" ''
                   # Remove NAT rules
-                  ${pkgs.nftables}/bin/nft delete table ip homelab_wap 2>/dev/null || true
+                  ${pkgs.iptables}/bin/iptables -t nat -D POSTROUTING -o ${cfg.wanInterface} -j MASQUERADE 2>/dev/null || true
+                  ${pkgs.iptables}/bin/iptables -D FORWARD -i ${cfg.interface} -o ${cfg.wanInterface} -j ACCEPT 2>/dev/null || true
+                  ${pkgs.iptables}/bin/iptables -D FORWARD -i ${cfg.wanInterface} -o ${cfg.interface} -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
 
                   # Release interface back to NetworkManager
                   ${pkgs.iproute2}/bin/ip addr flush dev ${cfg.interface} 2>/dev/null || true
